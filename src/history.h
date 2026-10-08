@@ -211,6 +211,8 @@ struct SharedHistories {
         assert((threadCount & (threadCount - 1)) == 0 && threadCount != 0);
         sizeMinus1         = correctionHistory.get_size() - 1;
         pawnHistSizeMinus1 = pawnHistory.get_size() - 1;
+        globalCorrection[WHITE] = -5;
+        globalCorrection[BLACK] = -5;
     }
 
     auto& continuationHistory() { return continuationHistoryBlock->table; }
@@ -251,6 +253,10 @@ struct SharedHistories {
     LargePagePtr<ContinuationHistoryBlock> continuationHistoryBlock;
     PawnHistory                            pawnHistory;
 
+    // Position-independent correction-history entry per side to move, tracking
+    // the systematic game-long bias of the static eval that no position-keyed
+    // correction source can cluster.
+    StatsEntry<i16, CORRECTION_HISTORY_LIMIT, true> globalCorrection[COLOR_NB];
 
    private:
     usize sizeMinus1, pawnHistSizeMinus1;
