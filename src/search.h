@@ -130,6 +130,10 @@ struct Stack {
     int                         cutoffCnt;
     int                         reduction;
     int                         priorNMPFailHigh;
+
+    // 8-bit sketch of this node's NNUE accumulator, or -1 when the eval was
+    // served from the transposition table and no fresh accumulator exists
+    int nnueSketchKey = -1;
 };
 
 
