@@ -41,6 +41,7 @@
 #include "movepick.h"
 #include "nnue/network.h"
 #include "nnue/nnue_accumulator.h"
+#include "nnue/nnue_architecture.h"
 #include "position.h"
 #include "syzygy/tbprobe.h"
 #include "thread.h"
@@ -84,6 +85,56 @@ using SearchedList                  = ValueList<Move, SEARCHEDLIST_CAPACITY>;
 // (*Scaler) All tuned parameters at time controls shorter than
 // optimized for require verifications at longer time controls.
 
+// 16 random +-1 projection patterns over the NNUE accumulator, generated at
+// compile time. The first 8 patterns, each evaluated on every 8th accumulator
+// dimension, give a cheap SimHash: 8 sign bits = 256-bucket correction table,
+// small enough to stay cache friendly with high bucket hit rates. The
+// accumulator's 128-bit blocks are stored in an architecture-dependent
+// permuted order (see AccumulatorBlockOrder), so the patterns are themselves
+// permuted into the stored layout at compile time; a sequential stride-8
+// read then yields the canonical, architecture-independent sketch.
+constexpr auto SketchPatterns = []() {
+    std::array<std::array<i16, Eval::NNUE::L1>, 16> p{};
+    u64                                              s = 0x9E3779B97F4A7C15ULL;
+    for (auto& row : p)
+        for (auto& v : row)
+        {
+            s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            v = (s >> 32) & 0x100 ? i16(1) : i16(-1);
+        }
+
+    // Reposition the sampled coefficients from canonical blocks to the
+    // stored blocks: permute() places canonical block blk at stored block
+    // (blk & ~7) + inverse(AccumulatorBlockOrder)[blk & 7].
+    std::array<usize, 8> inverse{};
+    for (int j = 0; j < 8; ++j)
+        inverse[Eval::NNUE::AccumulatorBlockOrder[j]] = usize(j);
+
+    std::array<std::array<i16, Eval::NNUE::L1>, 16> q{};
+    for (int k = 0; k < 16; ++k)
+        for (int blk = 0; blk < int(Eval::NNUE::L1) / 8; ++blk)
+        {
+            const int phys = (blk & ~7) + int(inverse[blk & 7]);
+            q[k][8 * phys] = p[k][8 * blk];
+        }
+    return q;
+}();
+
+// 8-bit SimHash key of the accumulator of the side to move: the signs of 8
+// projections over every 8th accumulator dimension. Call only right after
+// evaluate(pos) refreshed the accumulator stack.
+int nnue_sketch_key(const std::array<i16, Eval::NNUE::L1>& acc) {
+    u32 sk = 0;
+    for (int k = 0; k < 8; ++k)
+    {
+        i32 s = 0;
+        for (int i = 0; i < int(Eval::NNUE::L1); i += 8)
+            s += SketchPatterns[k][i] * acc[i];
+        sk |= (s >= 0 ? 1u : 0u) << k;
+    }
+    return int(sk & 0xFFu);
+}
+
 int correction_value(const Worker& w, const Position& pos, const Stack* const ss) {
     const Color us     = pos.side_to_move();
     const auto  m      = (ss - 1)->currentMove;
@@ -123,6 +174,9 @@ void update_correction_history(const Position& pos,
     shared.minor_piece_correction_entry(pos)[us].minor << bonus * 150 / 128;
     shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite << bonus * nonPawnWeight / 128;
     shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack << bonus * nonPawnWeight / 128;
+
+    if (ss->nnueSketchKey >= 0)
+        shared.nnueSketchCorrection[ss->nnueSketchKey][us] << bonus * 150 / 128;
 
     if (m.is_ok())
     {
@@ -710,11 +764,14 @@ void Search::Worker::clear() {
     sharedHistory.pawnHistory.clear_range(-1338, numaThreadIdx, numaTotal);
 
     if (numaThreadIdx == 0)
+    {
+        sharedHistory.nnueSketchCorrection.fill(-5);
         for (bool inCheck : {false, true})
             for (StatsType c : {NoCaptures, Captures})
                 for (auto& to : continuationHistory[inCheck][c])
                     for (auto& h : to)
                         h.fill(-586);
+    }
 
     ttMoveHistory = 0;
 
@@ -826,8 +883,9 @@ Value Search::Worker::search(
     ss->statScore              = 0;
     (ss + 2)->cutoffCnt        = 0;
     (ss + 1)->priorNMPFailHigh = 0;
+    ss->nnueSketchKey          = -1;
 
-    const auto correctionValue = correction_value(*this, pos, ss);
+    int correctionValue = correction_value(*this, pos, ss);
 
     // Step 4. Transposition table lookup
     excludedMove                   = ss->excludedMove;
@@ -853,7 +911,13 @@ Value Search::Worker::search(
         // Never assume anything about values stored in TT
         unadjustedStaticEval = ttData.eval;
         if (!is_valid(unadjustedStaticEval))
+        {
             unadjustedStaticEval = evaluate(pos);
+            ss->nnueSketchKey =
+              nnue_sketch_key(accumulatorStack.latest().accumulation[pos.side_to_move()]);
+            correctionValue +=
+              13806 * sharedHistory.nnueSketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
+        }
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
@@ -865,6 +929,11 @@ Value Search::Worker::search(
     else
     {
         unadjustedStaticEval = evaluate(pos);
+        ss->nnueSketchKey =
+          nnue_sketch_key(accumulatorStack.latest().accumulation[pos.side_to_move()]);
+        correctionValue +=
+          13806 * sharedHistory.nnueSketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
+
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
         // Static evaluation is saved as it was before adjustment by correction history

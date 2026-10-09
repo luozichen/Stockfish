@@ -21,6 +21,7 @@
 #ifndef NNUE_ARCHITECTURE_H_INCLUDED
 #define NNUE_ARCHITECTURE_H_INCLUDED
 
+#include <array>
 #include <cstdint>
 #include <iosfwd>
 
@@ -47,6 +48,21 @@ constexpr int       L2 = 32;
 constexpr int       L3 = 32;
 
 constexpr IndexType LayerStacks = 8;
+
+// The accumulator's 128-bit blocks are stored in a permuted order on some
+// SIMD architectures, chosen so that packed SIMD operations produce the
+// transformer output in canonical dimension order. Code that reads raw
+// accumulator data must map canonical blocks through this order to stay
+// architecture-independent.
+constexpr std::array<usize, 8> AccumulatorBlockOrder = {
+#if defined(USE_AVX512)
+  0, 2, 4, 6, 1, 3, 5, 7,
+#elif defined(USE_AVX2) || defined(USE_LASX)
+  0, 2, 1, 3, 4, 6, 5, 7,
+#else
+  0, 1, 2, 3, 4, 5, 6, 7,
+#endif
+};
 
 struct NetworkArchitecture {
     static constexpr IndexType TransformedFeatureDimensions = L1;
