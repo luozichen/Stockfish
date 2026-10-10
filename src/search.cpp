@@ -41,6 +41,7 @@
 #include "movepick.h"
 #include "nnue/network.h"
 #include "nnue/nnue_accumulator.h"
+#include "nnue/nnue_architecture.h"
 #include "position.h"
 #include "syzygy/tbprobe.h"
 #include "thread.h"
@@ -92,6 +93,74 @@ const std::array<int, MAX_MOVES> reductions = [] {
 // (*Scaler) All tuned parameters at time controls shorter than
 // optimized for require verifications at longer time controls.
 
+// 8 random +-1 projection patterns over the 64 last-hidden-layer activations
+// (squared-clipped and clipped outputs of fc_1), generated at compile time.
+// Their sign bits form a SimHash: 8 bits = 256-bucket correction table, small
+// enough to stay cache friendly with high bucket hit rates. The activations
+// are non-negative clipped values, so each projection is centered by a
+// per-dimension mean (measured offline over self-play); the centering is
+// folded into a per-pattern bias so the key computation is a single
+// vectorizable multiply-accumulate over the raw activations.
+constexpr auto SketchPatterns = []() {
+    std::array<std::array<i8, 64>, 8> p{};
+    std::array<i32, 8>                bias{};
+    constexpr std::array<i16, 64> center{
+      59, 36, 16, 35, 20, 18, 22, 24, 27, 23, 42, 21, 30, 34, 29, 105,
+      33, 25, 79, 28, 49, 18, 22, 39, 75, 22, 42, 39, 15, 31, 34, 25,
+      7, 22, 14, 37, 15, 11, 7, 16, 29, 16, 5, 26, 14, 31, 19, 6,
+      35, 22, 9, 22, 10, 8, 7, 18, 5, 14, 8, 16, 17, 9, 13, 17};
+    u64                               s = 0xD1B54A32D192ED03ULL;
+    for (auto& row : p)
+        for (auto& v : row)
+        {
+            s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            v = (s >> 32) & 0x100 ? i8(1) : i8(-1);
+        }
+    for (int k = 0; k < 8; ++k)
+    {
+        i32 b = 0;
+        for (int i = 0; i < 64; ++i)
+            b += p[k][i] * center[i];
+        bias[k] = b;
+    }
+
+    // canonical -> stored position within the 64 L3 values: the lane
+    // interleaving permutes 4-value chunks inside each 32-value block
+    const auto chunk_lane = [](int c) {
+#if defined(USE_PAIR_ACTIVATIONS) || defined(USE_LASX)
+    #if defined(USE_AVX512)
+        return (c % 4) * 2 + c / 4;
+    #else
+        return (c % 2) * 4 + c / 2;
+    #endif
+#else
+        return c;
+#endif
+    };
+    std::array<std::array<i8, 64>, 8> q{};
+    for (int k = 0; k < 8; ++k)
+        for (int d = 0; d < 64; ++d)
+        {
+            const int phys = (d / 32) * 32 + chunk_lane((d % 32) / 4) * 4 + d % 4;
+            q[k][phys]     = p[k][d];
+        }
+    return std::pair(q, bias);
+}();
+
+// 8-bit SimHash key of the stashed hidden activations. Call only right after
+// evaluate(pos) refreshed them.
+int nnue_sketch_key(const int16_t* l3) {
+    u32 sk = 0;
+    for (int k = 0; k < 8; ++k)
+    {
+        i32 s = -SketchPatterns.second[k];
+        for (int i = 0; i < 64; ++i)
+            s += SketchPatterns.first[k][i] * l3[i];
+        sk |= (s >= 0 ? 1u : 0u) << k;
+    }
+    return int(sk & 0xFFu);
+}
+
 int correction_value(const Worker& w, const Position& pos, const Stack* const ss) {
     const Color us     = pos.side_to_move();
     const auto  m      = (ss - 1)->currentMove;
@@ -131,6 +200,9 @@ void update_correction_history(const Position& pos,
     shared.minor_piece_correction_entry(pos)[us].minor << bonus * 150 / 128;
     shared.nonpawn_correction_entry<WHITE>(pos)[us].nonPawnWhite << bonus * nonPawnWeight / 128;
     shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack << bonus * nonPawnWeight / 128;
+
+    if (ss->nnueSketchKey >= 0)
+        shared.l3SketchCorrection[ss->nnueSketchKey][us] << bonus * 150 / 128;
 
     if (m.is_ok())
     {
@@ -717,11 +789,14 @@ void Search::Worker::clear() {
     sharedHistory.pawnHistory.clear_range(-1338, numaThreadIdx, numaTotal);
 
     if (numaThreadIdx == 0)
+    {
+        sharedHistory.l3SketchCorrection.fill(-5);
         for (bool inCheck : {false, true})
             for (StatsType c : {NoCaptures, Captures})
                 for (auto& to : continuationHistory[inCheck][c])
                     for (auto& h : to)
                         h.fill(-586);
+    }
 
     ttMoveHistory = 0;
 
@@ -830,8 +905,9 @@ Value Search::Worker::search(
     ss->statScore              = 0;
     (ss + 2)->cutoffCnt        = 0;
     (ss + 1)->priorNMPFailHigh = 0;
+    ss->nnueSketchKey          = -1;
 
-    const auto correctionValue = correction_value(*this, pos, ss);
+    int correctionValue = correction_value(*this, pos, ss);
 
     // Step 4. Transposition table lookup
     excludedMove                   = ss->excludedMove;
@@ -857,7 +933,12 @@ Value Search::Worker::search(
         // Never assume anything about values stored in TT
         unadjustedStaticEval = ttData.eval;
         if (!is_valid(unadjustedStaticEval))
+        {
             unadjustedStaticEval = evaluate(pos);
+            ss->nnueSketchKey    = nnue_sketch_key(Eval::NNUE::l3_stash());
+            correctionValue +=
+              13806 * sharedHistory.l3SketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
+        }
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
@@ -869,6 +950,10 @@ Value Search::Worker::search(
     else
     {
         unadjustedStaticEval = evaluate(pos);
+        ss->nnueSketchKey    = nnue_sketch_key(Eval::NNUE::l3_stash());
+        correctionValue +=
+          13806 * sharedHistory.l3SketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
+
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
         // Static evaluation is saved as it was before adjustment by correction history
@@ -1750,7 +1835,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         bestValue = futilityBase = -VALUE_INFINITE;
     else
     {
-        const auto correctionValue = correction_value(*this, pos, ss);
+        int correctionValue = correction_value(*this, pos, ss);
 
         if (ss->ttHit)
         {
@@ -1758,7 +1843,12 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
             unadjustedStaticEval = ttData.eval;
 
             if (!is_valid(unadjustedStaticEval))
+            {
                 unadjustedStaticEval = evaluate(pos);
+                const int sketchKey  = nnue_sketch_key(Eval::NNUE::l3_stash());
+                correctionValue +=
+                  13806 * sharedHistory.l3SketchCorrection[sketchKey][pos.side_to_move()];
+            }
 
             ss->staticEval = bestValue =
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);
@@ -1771,7 +1861,10 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         else
         {
             unadjustedStaticEval = evaluate(pos);
-            ss->staticEval       = bestValue =
+            const int sketchKey  = nnue_sketch_key(Eval::NNUE::l3_stash());
+            correctionValue +=
+              13806 * sharedHistory.l3SketchCorrection[sketchKey][pos.side_to_move()];
+            ss->staticEval = bestValue =
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);
         }
 

@@ -48,6 +48,15 @@ constexpr int       L3 = 32;
 
 constexpr IndexType LayerStacks = 8;
 
+// The 64 activations of the last hidden layer (squared-clipped and clipped
+// outputs of fc_1, i.e. the input to fc_2), stashed per thread during
+// propagate(). Architecture-independent network outputs, usable for cheap
+// hashing right after a fresh evaluation.
+inline int16_t* l3_stash() {
+    static thread_local int16_t stash[64] = {0};
+    return stash;
+}
+
 struct NetworkArchitecture {
     static constexpr IndexType TransformedFeatureDimensions = L1;
     static constexpr int       FC_0_OUTPUTS                 = L2;
@@ -121,6 +130,9 @@ struct NetworkArchitecture {
         ac_sqr_1.propagate(buffer.fc_1_out, buffer.concat_buffer + FC_0_OUTPUTS * 2);
         ac_1.propagate(buffer.fc_1_out, buffer.concat_buffer + FC_0_OUTPUTS * 2 + FC_1_OUTPUTS);
 #endif
+
+        for (int i = 0; i < 64; ++i)
+            l3_stash()[i] = int16_t(buffer.concat_buffer[64 + i]);
 
         fc_2.propagate(buffer.concat_buffer, buffer.fc_2_out);
 

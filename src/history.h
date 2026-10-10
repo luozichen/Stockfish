@@ -209,8 +209,9 @@ struct SharedHistories {
         continuationHistoryBlock(make_unique_large_page<ContinuationHistoryBlock>()),
         pawnHistory(threadCount) {
         assert((threadCount & (threadCount - 1)) == 0 && threadCount != 0);
-        sizeMinus1         = correctionHistory.get_size() - 1;
-        pawnHistSizeMinus1 = pawnHistory.get_size() - 1;
+        sizeMinus1            = correctionHistory.get_size() - 1;
+        pawnHistSizeMinus1    = pawnHistory.get_size() - 1;
+        l3SketchCorrection.fill(-5);
     }
 
     auto& continuationHistory() { return continuationHistoryBlock->table; }
@@ -250,6 +251,12 @@ struct SharedHistories {
     UnifiedCorrectionHistory               correctionHistory;
     LargePagePtr<ContinuationHistoryBlock> continuationHistoryBlock;
     PawnHistory                            pawnHistory;
+
+    // Correction history indexed by an 8-bit SimHash sketch of the network's
+    // last-hidden-layer activations: clusters the static eval error by what
+    // the net actually computed, which none of the position-keyed sources
+    // express.
+    AtomicStats<i16, CORRECTION_HISTORY_LIMIT, 256, COLOR_NB> l3SketchCorrection;
 
 
    private:
