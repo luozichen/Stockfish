@@ -937,7 +937,7 @@ Value Search::Worker::search(
             unadjustedStaticEval = evaluate(pos);
             ss->nnueSketchKey    = nnue_sketch_key(Eval::NNUE::l3_stash());
             correctionValue +=
-              13806 * sharedHistory.l3SketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
+              9512 * sharedHistory.l3SketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
         }
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
@@ -952,7 +952,7 @@ Value Search::Worker::search(
         unadjustedStaticEval = evaluate(pos);
         ss->nnueSketchKey    = nnue_sketch_key(Eval::NNUE::l3_stash());
         correctionValue +=
-          13806 * sharedHistory.l3SketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
+          9512 * sharedHistory.l3SketchCorrection[ss->nnueSketchKey][pos.side_to_move()];
 
         ss->staticEval = eval = to_corrected_static_eval(unadjustedStaticEval, correctionValue);
 
@@ -1847,7 +1847,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
                 unadjustedStaticEval = evaluate(pos);
                 const int sketchKey  = nnue_sketch_key(Eval::NNUE::l3_stash());
                 correctionValue +=
-                  13806 * sharedHistory.l3SketchCorrection[sketchKey][pos.side_to_move()];
+                  9512 * sharedHistory.l3SketchCorrection[sketchKey][pos.side_to_move()];
             }
 
             ss->staticEval = bestValue =
@@ -1863,7 +1863,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
             unadjustedStaticEval = evaluate(pos);
             const int sketchKey  = nnue_sketch_key(Eval::NNUE::l3_stash());
             correctionValue +=
-              13806 * sharedHistory.l3SketchCorrection[sketchKey][pos.side_to_move()];
+              9512 * sharedHistory.l3SketchCorrection[sketchKey][pos.side_to_move()];
             ss->staticEval = bestValue =
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);
         }
