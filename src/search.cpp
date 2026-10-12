@@ -116,7 +116,7 @@ int nnue_sketch_key(SharedHistories& shared, const int8_t* stash) {
 // fresh (Stack::nnueSketchKey >= 0); at TT-served nodes the position's key is
 // unknown and no sketch correction applies.
 int sketch_correction_value(const SharedHistories& shared, int key, Color us) {
-    return key >= 0 ? 9512 * shared.sketch_correction_entry(key)[us].sketch : 0;
+    return key >= 0 ? 9512 * shared.sketch_correction_entry(key)[us] : 0;
 }
 
 int correction_value(const Worker& w, const Position& pos, const Stack* const ss) {
@@ -160,7 +160,7 @@ void update_correction_history(const Position& pos,
     shared.nonpawn_correction_entry<BLACK>(pos)[us].nonPawnBlack << bonus * nonPawnWeight / 128;
 
     if (ss->nnueSketchKey >= 0)
-        shared.sketch_correction_entry(ss->nnueSketchKey)[us].sketch << bonus * 150 / 128;
+        shared.sketch_correction_entry(ss->nnueSketchKey)[us] << bonus * 150 / 128;
 
     if (m.is_ok())
     {
@@ -752,6 +752,7 @@ void Search::Worker::clear() {
     if (numaThreadIdx == 0)
     {
         sharedHistory.reset_sketch_centers();
+        sharedHistory.sketchCorrection.fill(-5);
         for (bool inCheck : {false, true})
             for (StatsType c : {NoCaptures, Captures})
                 for (auto& to : continuationHistory[inCheck][c])

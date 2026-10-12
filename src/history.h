@@ -163,14 +163,12 @@ struct CorrectionBundle {
     StatsEntry<T, D, true> minor;
     StatsEntry<T, D, true> nonPawnWhite;
     StatsEntry<T, D, true> nonPawnBlack;
-    StatsEntry<T, D, true> sketch;
 
     void operator=(T val) {
         pawn         = val;
         minor        = val;
         nonPawnWhite = val;
         nonPawnBlack = val;
-        sketch       = val;
     }
 };
 
@@ -218,6 +216,7 @@ struct SharedHistories {
         pawnHistSizeMinus1 = pawnHistory.get_size() - 1;
         for (auto& c : sketchCenters)
             c = 0;
+        sketchCorrection.fill(-5);
     }
 
     auto& continuationHistory() { return continuationHistoryBlock->table; }
@@ -254,10 +253,11 @@ struct SharedHistories {
         return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
     }
 
-    auto& sketch_correction_entry(int key) { return correctionHistory[key & sizeMinus1]; }
-    const auto& sketch_correction_entry(int key) const {
-        return correctionHistory[key & sizeMinus1];
-    }
+    // The sketch source keeps a small private table instead of a bundle
+    // member: at 16 KB it stays cache-resident, and the position-keyed
+    // sources keep their bundle size untouched.
+    auto& sketch_correction_entry(int key) { return sketchCorrection[key]; }
+    const auto& sketch_correction_entry(int key) const { return sketchCorrection[key]; }
 
     // The sketch source keeps its projections centered online: the running
     // means of the raw projections advance with the same eval traffic that
@@ -277,6 +277,8 @@ struct SharedHistories {
     LargePagePtr<ContinuationHistoryBlock> continuationHistoryBlock;
     PawnHistory                            pawnHistory;
     std::array<RelaxedAtomic<i32>, Eval::NNUE::SketchBits> sketchCenters;
+    AtomicStats<i16, CORRECTION_HISTORY_LIMIT, 1 << Eval::NNUE::SketchBits, COLOR_NB>
+      sketchCorrection;
 
 
    private:

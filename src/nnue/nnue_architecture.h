@@ -142,6 +142,24 @@ inline void sketch_projections(const int8_t* stash, i32* proj) {
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(tmp), sum32);
         proj[k] = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
     }
+#elif defined(USE_SSSE3)
+    // Same unsigned*signed dot products as the AVX2 path, at 128 bits. Lane
+    // sums hold at most 8 products (<= 2032), far inside i16.
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i ones = _mm_set1_epi16(1);
+    for (int k = 0; k < SketchBits; ++k)
+    {
+        const auto* pat = reinterpret_cast<const __m128i*>(SketchPatterns[k].data());
+        const auto* in  = reinterpret_cast<const __m128i*>(stash);
+        __m128i     acc = zero;
+        for (int c = 0; c < FC2InputSize / 16; ++c)
+            acc = _mm_adds_epi16(acc, _mm_maddubs_epi16(_mm_loadu_si128(in + c),
+                                                        _mm_loadu_si128(pat + c)));
+        acc = _mm_madd_epi16(acc, ones);
+        int32_t tmp[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(tmp), acc);
+        proj[k] = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+    }
 #elif defined(USE_SSE2)
     const __m128i zero = _mm_setzero_si128();
     for (int k = 0; k < SketchBits; ++k)
