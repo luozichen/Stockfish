@@ -217,6 +217,7 @@ struct SharedHistories {
         for (auto& c : sketchCenters)
             c = 0;
         sketchCorrection.fill(-5);
+        sketchShadow.fill(0);
     }
 
     auto& continuationHistory() { return continuationHistoryBlock->table; }
@@ -279,6 +280,12 @@ struct SharedHistories {
     std::array<RelaxedAtomic<i32>, Eval::NNUE::SketchBits> sketchCenters;
     AtomicStats<i16, CORRECTION_HISTORY_LIMIT, 1 << Eval::NNUE::SketchBits, COLOR_NB>
       sketchCorrection;
+    // Sanity build only: never updated, stays 0. The application reads this
+    // instead of the sketch table, keeping the source's memory traffic and
+    // code shape while making its effect on the search exactly zero. Updates
+    // still write the real table.
+    AtomicStats<i16, CORRECTION_HISTORY_LIMIT, 1 << Eval::NNUE::SketchBits, COLOR_NB>
+      sketchShadow;
 
 
    private:
