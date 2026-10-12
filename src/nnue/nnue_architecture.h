@@ -130,10 +130,11 @@ inline void sketch_projections(const int8_t* stash, i32* proj) {
     {
         const auto* pat = reinterpret_cast<const __m256i*>(SketchPatterns[k].data());
         const auto* in  = reinterpret_cast<const __m256i*>(stash);
-        const __m256i s0 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 0), pat[0]);
-        const __m256i s1 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 1), pat[1]);
-        const __m256i s2 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 2), pat[2]);
-        const __m256i s3 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 3), pat[3]);
+        // loadu everywhere: the patterns carry no alignment guarantee
+        const __m256i s0 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 0), _mm256_loadu_si256(pat + 0));
+        const __m256i s1 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 1), _mm256_loadu_si256(pat + 1));
+        const __m256i s2 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 2), _mm256_loadu_si256(pat + 2));
+        const __m256i s3 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 3), _mm256_loadu_si256(pat + 3));
         const __m256i sum =
           _mm256_adds_epi16(_mm256_adds_epi16(s0, s1), _mm256_adds_epi16(s2, s3));
         const __m256i sum32 = _mm256_madd_epi16(sum, ones);
@@ -151,13 +152,14 @@ inline void sketch_projections(const int8_t* stash, i32* proj) {
         for (int c = 0; c < FC2InputSize / 16; ++c)
         {
             const __m128i bytes = _mm_loadu_si128(in + c);
+            const __m128i patt  = _mm_loadu_si128(pat + c);
             // unsigned widening of the non-negative stash, sign-preserving
             // widening of the +-1 patterns
             const __m128i sLo = _mm_unpacklo_epi8(bytes, zero);
             const __m128i sHi = _mm_unpackhi_epi8(bytes, zero);
-            const __m128i sgn = _mm_cmpgt_epi8(zero, pat[c]);
-            const __m128i pLo = _mm_unpacklo_epi8(pat[c], sgn);
-            const __m128i pHi = _mm_unpackhi_epi8(pat[c], sgn);
+            const __m128i sgn = _mm_cmpgt_epi8(zero, patt);
+            const __m128i pLo = _mm_unpacklo_epi8(patt, sgn);
+            const __m128i pHi = _mm_unpackhi_epi8(patt, sgn);
             acc = _mm_add_epi32(acc, _mm_madd_epi16(sLo, pLo));
             acc = _mm_add_epi32(acc, _mm_madd_epi16(sHi, pHi));
         }
