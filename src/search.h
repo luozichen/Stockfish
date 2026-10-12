@@ -130,6 +130,11 @@ struct Stack {
     int                         cutoffCnt;
     int                         reduction;
     int                         priorNMPFailHigh;
+
+    // SimHash key of this node's stashed output-layer input, or -1 when the
+    // eval was served from the transposition table and no fresh activations
+    // exist
+    int nnueSketchKey = -1;
 };
 
 

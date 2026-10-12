@@ -48,6 +48,133 @@ constexpr int       L3 = 32;
 
 constexpr IndexType LayerStacks = 8;
 
+// The 128 values the output layer reads: both hidden layers, each in their
+// squared-clipped and clipped flavors. These are stashed per thread during
+// propagate(): architecture-independent network outputs, usable for cheap
+// hashing right after a fresh evaluation.
+constexpr int FC2InputSize = L2 * 2 + L3 * 2;
+
+inline int8_t* fc2_input_stash() {
+    static thread_local int8_t stash[FC2InputSize] = {0};
+    return stash;
+}
+
+// Width of the SimHash key over the stashed activations: SketchBits balanced
+// +-1 projections, one sign bit each, addressing the sketch correction source.
+constexpr int SketchBits = 12;
+
+// SketchBits balanced +-1 projection patterns over the stashed output-layer
+// input, generated at compile time: each pattern holds exactly half +1 and
+// half -1 entries, so raw projections are centered when activation means are
+// uniform. The coefficients are permuted from canonical to stored layout:
+// under USE_PAIR_ACTIVATIONS (and LASX) the pair propagation writes 4-value
+// chunks interleaved per 128-bit lane (the layout the next layer's weight
+// scrambling compensates for), keeping the sketch architecture independent.
+constexpr auto SketchPatterns = []() {
+    std::array<std::array<int8_t, FC2InputSize>, SketchBits> q{};
+    std::array<int, FC2InputSize>                            slot{};
+    u64                                                      s = 0x9E3779B97F4A7C15ULL;
+    for (auto& row : q)
+    {
+        for (int i = 0; i < FC2InputSize; ++i)
+        {
+            slot[i] = i;
+            row[i]  = 1;
+        }
+        // flip exactly half of the positions to -1 (partial Fisher-Yates)
+        for (int i = 0; i < FC2InputSize / 2; ++i)
+        {
+            s           = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            const int j = i + int((s >> 32) % unsigned(FC2InputSize - i));
+            const int t = slot[i], r = slot[j];
+            slot[i]     = r;
+            slot[j]     = t;
+            row[r]      = -1;
+        }
+    }
+
+    const auto chunk_lane = [](int c) {
+#if defined(USE_PAIR_ACTIVATIONS) || defined(USE_LASX)
+    #if defined(USE_AVX512)
+        return (c % 4) * 2 + c / 4;
+    #else
+        return (c % 2) * 4 + c / 2;
+    #endif
+#else
+        return c;
+#endif
+    };
+    for (auto& row : q)
+    {
+        const std::array<int8_t, FC2InputSize> p = row;
+        for (int d = 0; d < FC2InputSize; ++d)
+        {
+            const int phys = (d / 32) * 32 + chunk_lane((d % 32) / 4) * 4 + d % 4;
+            row[phys]      = p[d];
+        }
+    }
+    return q;
+}();
+
+// Raw SimHash projections of the stashed activations:
+// proj[k] = sum_i SketchPatterns[k][i] * stash[i].
+// The stash is non-negative 8-bit, which the unsigned*signed dot products
+// below exploit. All intermediate sums stay far within their widths: a
+// maddubs lane holds two products (|.| <= 254), the i16 accumulation at most
+// four such lanes (<= 1016), the madd to 32-bit at most 8 products.
+inline void sketch_projections(const int8_t* stash, i32* proj) {
+#if defined(USE_AVX2)
+    const __m256i ones = _mm256_set1_epi16(1);
+    for (int k = 0; k < SketchBits; ++k)
+    {
+        const auto* pat = reinterpret_cast<const __m256i*>(SketchPatterns[k].data());
+        const auto* in  = reinterpret_cast<const __m256i*>(stash);
+        const __m256i s0 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 0), pat[0]);
+        const __m256i s1 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 1), pat[1]);
+        const __m256i s2 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 2), pat[2]);
+        const __m256i s3 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 3), pat[3]);
+        const __m256i sum =
+          _mm256_adds_epi16(_mm256_adds_epi16(s0, s1), _mm256_adds_epi16(s2, s3));
+        const __m256i sum32 = _mm256_madd_epi16(sum, ones);
+        int32_t       tmp[8];
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(tmp), sum32);
+        proj[k] = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
+    }
+#elif defined(USE_SSE2)
+    const __m128i zero = _mm_setzero_si128();
+    for (int k = 0; k < SketchBits; ++k)
+    {
+        const auto* pat = reinterpret_cast<const __m128i*>(SketchPatterns[k].data());
+        const auto* in  = reinterpret_cast<const __m128i*>(stash);
+        __m128i     acc = zero;
+        for (int c = 0; c < FC2InputSize / 16; ++c)
+        {
+            const __m128i bytes = _mm_loadu_si128(in + c);
+            // unsigned widening of the non-negative stash, sign-preserving
+            // widening of the +-1 patterns
+            const __m128i sLo = _mm_unpacklo_epi8(bytes, zero);
+            const __m128i sHi = _mm_unpackhi_epi8(bytes, zero);
+            const __m128i sgn = _mm_cmpgt_epi8(zero, pat[c]);
+            const __m128i pLo = _mm_unpacklo_epi8(pat[c], sgn);
+            const __m128i pHi = _mm_unpackhi_epi8(pat[c], sgn);
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(sLo, pLo));
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(sHi, pHi));
+        }
+        int32_t tmp[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(tmp), acc);
+        proj[k] = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+    }
+#else
+    for (int k = 0; k < SketchBits; ++k)
+    {
+        i32 sum = 0;
+        for (int i = 0; i < FC2InputSize; ++i)
+            sum += i32(SketchPatterns[k][i]) * stash[i];
+        proj[k] = sum;
+    }
+#endif
+}
+
 struct NetworkArchitecture {
     static constexpr IndexType TransformedFeatureDimensions = L1;
     static constexpr int       FC_0_OUTPUTS                 = L2;
@@ -121,6 +248,12 @@ struct NetworkArchitecture {
         ac_sqr_1.propagate(buffer.fc_1_out, buffer.concat_buffer + FC_0_OUTPUTS * 2);
         ac_1.propagate(buffer.fc_1_out, buffer.concat_buffer + FC_0_OUTPUTS * 2 + FC_1_OUTPUTS);
 #endif
+
+        {
+            int8_t* stash = fc2_input_stash();
+            for (int i = 0; i < FC2InputSize; ++i)
+                stash[i] = buffer.concat_buffer[i];
+        }
 
         fc_2.propagate(buffer.concat_buffer, buffer.fc_2_out);
 

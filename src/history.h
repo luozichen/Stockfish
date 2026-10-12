@@ -31,6 +31,7 @@
 
 #include "memory.h"
 #include "misc.h"
+#include "nnue/nnue_architecture.h"
 #include "position.h"
 
 namespace Stockfish {
@@ -40,6 +41,8 @@ constexpr int UINT_16_HISTORY_SIZE     = std::numeric_limits<u16>::max() + 1;
 constexpr int CORRHIST_BASE_SIZE       = UINT_16_HISTORY_SIZE;
 constexpr int CORRECTION_HISTORY_LIMIT = 1024;
 constexpr int LOW_PLY_HISTORY_SIZE     = 5;
+// Time constant, in fresh evals, of the sketch source's online centering means
+constexpr int SKETCH_CENTER_TAU        = 1024;
 
 static_assert((PAWN_HISTORY_BASE_SIZE & (PAWN_HISTORY_BASE_SIZE - 1)) == 0,
               "PAWN_HISTORY_BASE_SIZE has to be a power of 2");
@@ -160,12 +163,14 @@ struct CorrectionBundle {
     StatsEntry<T, D, true> minor;
     StatsEntry<T, D, true> nonPawnWhite;
     StatsEntry<T, D, true> nonPawnBlack;
+    StatsEntry<T, D, true> sketch;
 
     void operator=(T val) {
         pawn         = val;
         minor        = val;
         nonPawnWhite = val;
         nonPawnBlack = val;
+        sketch       = val;
     }
 };
 
@@ -211,6 +216,8 @@ struct SharedHistories {
         assert((threadCount & (threadCount - 1)) == 0 && threadCount != 0);
         sizeMinus1         = correctionHistory.get_size() - 1;
         pawnHistSizeMinus1 = pawnHistory.get_size() - 1;
+        for (auto& c : sketchCenters)
+            c = 0;
     }
 
     auto& continuationHistory() { return continuationHistoryBlock->table; }
@@ -247,9 +254,29 @@ struct SharedHistories {
         return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
     }
 
+    auto& sketch_correction_entry(int key) { return correctionHistory[key & sizeMinus1]; }
+    const auto& sketch_correction_entry(int key) const {
+        return correctionHistory[key & sizeMinus1];
+    }
+
+    // The sketch source keeps its projections centered online: the running
+    // means of the raw projections advance with the same eval traffic that
+    // feeds the table, so the SimHash bits stay balanced for whatever net is
+    // loaded, with no measured constants.
+    int sketch_center(int k) const { return sketchCenters[k]; }
+    void update_sketch_center(int k, int value) {
+        const int c = sketchCenters[k];
+        sketchCenters[k] = c + (value - c) / SKETCH_CENTER_TAU;
+    }
+    void reset_sketch_centers() {
+        for (auto& c : sketchCenters)
+            c = 0;
+    }
+
     UnifiedCorrectionHistory               correctionHistory;
     LargePagePtr<ContinuationHistoryBlock> continuationHistoryBlock;
     PawnHistory                            pawnHistory;
+    std::array<RelaxedAtomic<i32>, Eval::NNUE::SketchBits> sketchCenters;
 
 
    private:
