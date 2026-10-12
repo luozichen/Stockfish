@@ -21,6 +21,7 @@
 #ifndef NNUE_ARCHITECTURE_H_INCLUDED
 #define NNUE_ARCHITECTURE_H_INCLUDED
 
+#include <array>
 #include <cstdint>
 #include <iosfwd>
 
