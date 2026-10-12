@@ -41,6 +41,7 @@
 #include "movepick.h"
 #include "nnue/network.h"
 #include "nnue/nnue_accumulator.h"
+#include "nnue/nnue_architecture.h"
 #include "position.h"
 #include "syzygy/tbprobe.h"
 #include "thread.h"
