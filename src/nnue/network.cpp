@@ -19,13 +19,14 @@
 #include "network.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
-#include <type_traits>
 #include <vector>
-#include <filesystem>
 
 #define INCBIN_SILENCE_BITCODE_WARNING
 #include "../incbin/incbin.h"
@@ -34,6 +35,7 @@
 #include "../misc.h"
 #include "../position.h"
 #include "../types.h"
+#include "layers/affine_transform.h"
 #include "nnue_architecture.h"
 #include "nnue_common.h"
 #include "nnue_misc.h"
