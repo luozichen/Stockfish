@@ -93,14 +93,18 @@ const std::array<int, MAX_MOVES> reductions = [] {
 // (*Scaler) All tuned parameters at time controls shorter than
 // optimized for require verifications at longer time controls.
 
+// The output bucket the current network stack used for this position, same
+// definition as Network::evaluate().
+int nnue_output_bucket(const Position& pos) { return (pos.count<ALL_PIECES>() - 1) / 4; }
+
 // SimHash key of the stashed activations, taken against the online centering
 // means, which this function also advances. Call only right after
 // evaluate(pos) refreshed the stash.
-int nnue_sketch_key(SharedHistories& shared, const int8_t* stash) {
+int nnue_sketch_key(SharedHistories& shared, int bucket, const uint8_t* stash) {
     using Eval::NNUE::SketchBits;
 
     std::array<i32, SketchBits> proj;
-    Eval::NNUE::sketch_projections(stash, proj.data());
+    Eval::NNUE::sketch_projections(bucket, stash, proj.data());
 
     int key = 0;
     for (int k = 0; k < SketchBits; ++k)
@@ -892,7 +896,7 @@ Value Search::Worker::search(
         if (!is_valid(unadjustedStaticEval))
         {
             unadjustedStaticEval = evaluate(pos);
-            ss->nnueSketchKey    = nnue_sketch_key(sharedHistory, Eval::NNUE::fc2_input_stash());
+            ss->nnueSketchKey    = nnue_sketch_key(sharedHistory, nnue_output_bucket(pos), Eval::NNUE::fc2_input_stash());
             correctionValue +=
               sketch_correction_value(sharedHistory, ss->nnueSketchKey, pos.side_to_move());
         }
@@ -907,7 +911,7 @@ Value Search::Worker::search(
     else
     {
         unadjustedStaticEval = evaluate(pos);
-        ss->nnueSketchKey    = nnue_sketch_key(sharedHistory, Eval::NNUE::fc2_input_stash());
+        ss->nnueSketchKey    = nnue_sketch_key(sharedHistory, nnue_output_bucket(pos), Eval::NNUE::fc2_input_stash());
         correctionValue +=
           sketch_correction_value(sharedHistory, ss->nnueSketchKey, pos.side_to_move());
 
@@ -1805,7 +1809,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
             if (!is_valid(unadjustedStaticEval))
             {
                 unadjustedStaticEval = evaluate(pos);
-                const int sketchKey  = nnue_sketch_key(sharedHistory, Eval::NNUE::fc2_input_stash());
+                const int sketchKey  = nnue_sketch_key(sharedHistory, nnue_output_bucket(pos), Eval::NNUE::fc2_input_stash());
                 correctionValue +=
                   sketch_correction_value(sharedHistory, sketchKey, pos.side_to_move());
             }
@@ -1821,7 +1825,7 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
         else
         {
             unadjustedStaticEval = evaluate(pos);
-            const int sketchKey  = nnue_sketch_key(sharedHistory, Eval::NNUE::fc2_input_stash());
+            const int sketchKey  = nnue_sketch_key(sharedHistory, nnue_output_bucket(pos), Eval::NNUE::fc2_input_stash());
             correctionValue += sketch_correction_value(sharedHistory, sketchKey, pos.side_to_move());
             ss->staticEval = bestValue =
               to_corrected_static_eval(unadjustedStaticEval, correctionValue);

@@ -176,6 +176,15 @@ class AffineTransform {
 #endif
     }
 
+    using WeightType = i8;
+
+    // Canonical-order weight access for tooling that inspects the layer
+    // numerically: reads exactly the value read_parameters() stored for
+    // canonical input index i.
+    [[nodiscard]] WeightType get_weight_canonical(IndexType i) const {
+        return weights[get_weight_index(i)];
+    }
+
     // Read network parameters
     bool read_parameters(std::istream& stream) {
         read_little_endian<BiasType>(stream, biases, OutputDimensions);
@@ -414,8 +423,7 @@ class AffineTransform {
     }
 
    private:
-    using BiasType   = OutputType;
-    using WeightType = i8;
+    using BiasType = OutputType;
 
     alignas(CacheLineSize) BiasType biases[OutputDimensions];
     alignas(CacheLineSize) WeightType weights[OutputDimensions * PaddedInputDimensions];

@@ -55,45 +55,38 @@ constexpr IndexType LayerStacks = 8;
 // hashing right after a fresh evaluation.
 constexpr int FC2InputSize = L2 * 2 + L3 * 2;
 
-inline int8_t* fc2_input_stash() {
-    static thread_local int8_t stash[FC2InputSize] = {0};
+inline uint8_t* fc2_input_stash() {
+    static thread_local uint8_t stash[FC2InputSize] = {0};
     return stash;
 }
 
-// Width of the SimHash key over the stashed activations: SketchBits balanced
-// +-1 projections, one sign bit each, addressing the sketch correction source.
+// Width of the SimHash key over the stashed activations: SketchBits
+// projections, one sign bit each, addressing the sketch correction source.
 constexpr int SketchBits = 12;
 
-// SketchBits balanced +-1 projection patterns over the stashed output-layer
-// input, generated at compile time: each pattern holds exactly half +1 and
-// half -1 entries, so raw projections are centered when activation means are
-// uniform. The coefficients are permuted from canonical to stored layout:
-// under USE_PAIR_ACTIVATIONS (and LASX) the pair propagation writes 4-value
-// chunks interleaved per 128-bit lane (the layout the next layer's weight
-// scrambling compensates for), keeping the sketch architecture independent.
-constexpr auto SketchPatterns = []() {
-    std::array<std::array<int8_t, FC2InputSize>, SketchBits> q{};
-    std::array<int, FC2InputSize>                            slot{};
-    u64                                                      s = 0x9E3779B97F4A7C15ULL;
-    for (auto& row : q)
-    {
-        for (int i = 0; i < FC2InputSize; ++i)
-        {
-            slot[i] = i;
-            row[i]  = 1;
-        }
-        // flip exactly half of the positions to -1 (partial Fisher-Yates)
-        for (int i = 0; i < FC2InputSize / 2; ++i)
-        {
-            s           = s * 6364136223846793005ULL + 1442695040888963407ULL;
-            const int j = i + int((s >> 32) % unsigned(FC2InputSize - i));
-            const int t = slot[i], r = slot[j];
-            slot[i]     = r;
-            slot[j]     = t;
-            row[r]      = -1;
-        }
-    }
+// Sketch patterns, generated at net-load time (see generate_sketch_patterns):
+// exactly orthogonal to the loaded net's output direction, so no bit of the
+// key can be a function of the eval's own readout.
+inline std::array<std::array<std::array<int8_t, FC2InputSize>, SketchBits>, LayerStacks>
+  SketchPatterns{};
 
+// The sketch patterns are generated at net-load time: each seed pattern
+// (balanced +-1, exactly half +1 and half -1) is made exactly orthogonal to
+// the loaded net's output direction in pure integer arithmetic,
+// p = |w|^2 * seed - (seed . w) * w, so p . w = 0 exactly. The key's
+// projection plane therefore contains no component of what the eval itself
+// reads out: every bit encodes information the eval cannot see. The seeds
+// are fixed constants; only the orthogonalization is net-derived, so the
+// source stays net-agnostic - a new net re-derives its own patterns.
+//
+// Weight layout note: the output layer's weights were pre-permuted at load
+// time to match the activations' stored layout - the same layout the stash
+// copies verbatim. The canonical-order weight vector is therefore used as-is
+// for the orthogonalization (both coordinates are canonical), and only the
+// final quantized patterns are permuted into stored layout to line up with
+// the stash, which under USE_PAIR_ACTIVATIONS (and LASX) is chunk-
+// interleaved per 128-bit lane.
+inline void generate_sketch_patterns(int bucket, const int8_t* outWeights) {
     const auto chunk_lane = [](int c) {
 #if defined(USE_PAIR_ACTIVATIONS) || defined(USE_LASX)
     #if defined(USE_AVX512)
@@ -105,57 +98,99 @@ constexpr auto SketchPatterns = []() {
         return c;
 #endif
     };
-    for (auto& row : q)
+    const auto to_stored = [&chunk_lane](int d) {
+        return (d / 32) * 32 + chunk_lane((d % 32) / 4) * 4 + d % 4;
+    };
+
+    u64 s = 0x9E3779B97F4A7C15ULL;
+    std::array<i32, FC2InputSize> w{}, p{};
+    for (int i = 0; i < FC2InputSize; ++i)
+        w[i] = outWeights[i];   // canonical order, like the non-pair stash
+
+    for (int k = 0; k < SketchBits; ++k)
     {
-        const std::array<int8_t, FC2InputSize> p = row;
-        for (int d = 0; d < FC2InputSize; ++d)
+        // balanced +-1 seed in canonical layout
+        std::array<int, FC2InputSize> slot{};
+        for (int i = 0; i < FC2InputSize; ++i)
         {
-            const int phys = (d / 32) * 32 + chunk_lane((d % 32) / 4) * 4 + d % 4;
-            row[phys]      = p[d];
+            slot[i] = i;
+            p[i]    = 1;
+        }
+        for (int i = 0; i < FC2InputSize / 2; ++i)
+        {
+            s            = s * 6364136223846793005ULL + 1442695040888963407ULL;
+            const int j  = i + int((s >> 32) % unsigned(FC2InputSize - i));
+            const int t  = slot[i], r = slot[j];
+            slot[i]      = r;
+            slot[j]      = t;
+            p[r]         = -1;
+        }
+
+        // exact integer orthogonalization: p = ww*p - pw*w has p.w = 0
+        // exactly. All intermediates fit i32: ww <= 128*127^2 ~ 2.1e6.
+        i32 ww = 0, pw = 0;
+        for (int i = 0; i < FC2InputSize; ++i)
+        {
+            ww += w[i] * w[i];
+            pw += p[i] * w[i];
+        }
+        for (int i = 0; i < FC2InputSize; ++i)
+            p[i] = ww * p[i] - pw * w[i];
+
+        // quantize to i8 per pattern with its own positive scale (which does
+        // not change the hash meaning) and magnitude bound 64: with stash
+        // entries <= 255, one maddubs i16 lane sum is then <= 2*255*64, and
+        // one madd i32 term <= 4*that - every SIMD step below stays exact.
+        i32 maxAbs = 1;
+        for (int i = 0; i < FC2InputSize; ++i)
+            maxAbs = std::max(maxAbs, std::abs(p[i]));
+        for (int i = 0; i < FC2InputSize; ++i)
+        {
+            const i32 v = (i64(p[i]) * 64) / maxAbs;
+            SketchPatterns[bucket][k][to_stored(i)] = int8_t(v);
         }
     }
-    return q;
-}();
+}
 
 // Raw SimHash projections of the stashed activations:
 // proj[k] = sum_i SketchPatterns[k][i] * stash[i].
-// The stash is non-negative 8-bit, which the unsigned*signed dot products
-// below exploit. All intermediate sums stay far within their widths: a
-// maddubs lane holds two products (|.| <= 254), the i16 accumulation at most
-// four such lanes (<= 1016), the madd to 32-bit at most 8 products.
-inline void sketch_projections(const int8_t* stash, i32* proj) {
+// The stash is non-negative 8-bit, which the unsigned*signed maddubs dot
+// products exploit; the patterns are quantized to magnitude <= 64 at
+// generation, so every maddubs i16 lane sum (<= 2*255*64) and every madd
+// i32 term (<= 4 lane sums) is exact - the accumulation below never
+// saturates and matches the scalar fallback bit for bit.
+inline void sketch_projections(int bucket, const uint8_t* stash, i32* proj) {
 #if defined(USE_AVX2)
-    const __m256i ones = _mm256_set1_epi16(1);
     for (int k = 0; k < SketchBits; ++k)
     {
-        const auto* pat = reinterpret_cast<const __m256i*>(SketchPatterns[k].data());
+        const auto* pat = reinterpret_cast<const __m256i*>(SketchPatterns[bucket][k].data());
         const auto* in  = reinterpret_cast<const __m256i*>(stash);
         // loadu everywhere: the patterns carry no alignment guarantee
-        const __m256i s0 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 0), _mm256_loadu_si256(pat + 0));
-        const __m256i s1 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 1), _mm256_loadu_si256(pat + 1));
-        const __m256i s2 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 2), _mm256_loadu_si256(pat + 2));
-        const __m256i s3 = _mm256_maddubs_epi16(_mm256_loadu_si256(in + 3), _mm256_loadu_si256(pat + 3));
-        const __m256i sum =
-          _mm256_adds_epi16(_mm256_adds_epi16(s0, s1), _mm256_adds_epi16(s2, s3));
-        const __m256i sum32 = _mm256_madd_epi16(sum, ones);
-        int32_t       tmp[8];
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(tmp), sum32);
+        __m256i acc = _mm256_setzero_si256();
+        for (int c = 0; c < FC2InputSize / 32; ++c)
+        {
+            const __m256i lanes = _mm256_maddubs_epi16(_mm256_loadu_si256(in + c),
+                                                       _mm256_loadu_si256(pat + c));
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(lanes, _mm256_set1_epi16(1)));
+        }
+        int32_t tmp[8];
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(tmp), acc);
         proj[k] = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7];
     }
 #elif defined(USE_SSSE3)
-    // Same unsigned*signed dot products as the AVX2 path, at 128 bits. Lane
-    // sums hold at most 8 products (<= 2032), far inside i16.
-    const __m128i zero = _mm_setzero_si128();
-    const __m128i ones = _mm_set1_epi16(1);
+    // Same unsigned*signed dot products as the AVX2 path, at 128 bits,
+    // accumulated in i32 for exactness.
     for (int k = 0; k < SketchBits; ++k)
     {
-        const auto* pat = reinterpret_cast<const __m128i*>(SketchPatterns[k].data());
+        const auto* pat = reinterpret_cast<const __m128i*>(SketchPatterns[bucket][k].data());
         const auto* in  = reinterpret_cast<const __m128i*>(stash);
-        __m128i     acc = zero;
+        __m128i     acc = _mm_setzero_si128();
         for (int c = 0; c < FC2InputSize / 16; ++c)
-            acc = _mm_adds_epi16(acc, _mm_maddubs_epi16(_mm_loadu_si128(in + c),
-                                                        _mm_loadu_si128(pat + c)));
-        acc = _mm_madd_epi16(acc, ones);
+        {
+            const __m128i lanes = _mm_maddubs_epi16(_mm_loadu_si128(in + c),
+                                                    _mm_loadu_si128(pat + c));
+            acc = _mm_add_epi32(acc, _mm_madd_epi16(lanes, _mm_set1_epi16(1)));
+        }
         int32_t tmp[4];
         _mm_storeu_si128(reinterpret_cast<__m128i*>(tmp), acc);
         proj[k] = tmp[0] + tmp[1] + tmp[2] + tmp[3];
@@ -164,7 +199,7 @@ inline void sketch_projections(const int8_t* stash, i32* proj) {
     const __m128i zero = _mm_setzero_si128();
     for (int k = 0; k < SketchBits; ++k)
     {
-        const auto* pat = reinterpret_cast<const __m128i*>(SketchPatterns[k].data());
+        const auto* pat = reinterpret_cast<const __m128i*>(SketchPatterns[bucket][k].data());
         const auto* in  = reinterpret_cast<const __m128i*>(stash);
         __m128i     acc = zero;
         for (int c = 0; c < FC2InputSize / 16; ++c)
@@ -190,7 +225,7 @@ inline void sketch_projections(const int8_t* stash, i32* proj) {
     {
         i32 sum = 0;
         for (int i = 0; i < FC2InputSize; ++i)
-            sum += i32(SketchPatterns[k][i]) * stash[i];
+            sum += i32(SketchPatterns[bucket][k][i]) * stash[i];
         proj[k] = sum;
     }
 #endif
@@ -271,7 +306,7 @@ struct NetworkArchitecture {
 #endif
 
         {
-            int8_t* stash = fc2_input_stash();
+            uint8_t* stash = fc2_input_stash();
             for (int i = 0; i < FC2InputSize; ++i)
                 stash[i] = buffer.concat_buffer[i];
         }
