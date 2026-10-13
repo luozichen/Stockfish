@@ -286,13 +286,13 @@ std::optional<std::string> Network::load(std::istream& stream) {
     // each seed pattern is made exactly orthogonal to the output layer's
     // readout direction (per output bucket), so the key's bits encode only
     // information the eval itself cannot see.
-    for (int bucket = 0; bucket < LayerStacks; ++bucket)
+    for (IndexType bucket = 0; bucket < LayerStacks; ++bucket)
     {
         std::array<int8_t, Eval::NNUE::FC2InputSize> outWeights{};
         const auto& fc2 = network[bucket].fc_2;
-        for (int i = 0; i < Eval::NNUE::FC2InputSize; ++i)
+        for (IndexType i = 0; i < Eval::NNUE::FC2InputSize; ++i)
             outWeights[i] = fc2.get_weight_canonical(i);
-        Eval::NNUE::generate_sketch_patterns(bucket, outWeights.data());
+        Eval::NNUE::generate_sketch_patterns(static_cast<int>(bucket), outWeights.data());
     }
 
     return std::make_optional(description);
