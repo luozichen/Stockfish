@@ -120,7 +120,7 @@ int nnue_sketch_key(SharedHistories& shared, int bucket, const uint8_t* stash) {
 // fresh (Stack::nnueSketchKey >= 0); at TT-served nodes the position's key is
 // unknown and no sketch correction applies.
 int sketch_correction_value(const SharedHistories& shared, int key, Color us) {
-    return key >= 0 ? 9512 * shared.sketch_correction_entry(key)[us] : 0;
+    return key >= 0 ? 1189 * shared.sketch_correction_entry(key)[us] : 0;
 }
 
 int correction_value(const Worker& w, const Position& pos, const Stack* const ss) {
