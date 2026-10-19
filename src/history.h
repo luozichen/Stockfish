@@ -39,6 +39,7 @@ constexpr int PAWN_HISTORY_BASE_SIZE   = 8192;  // has to be a power of 2
 constexpr int UINT_16_HISTORY_SIZE     = std::numeric_limits<u16>::max() + 1;
 constexpr int CORRHIST_BASE_SIZE       = UINT_16_HISTORY_SIZE;
 constexpr int CORRECTION_HISTORY_LIMIT = 1024;
+constexpr int QUEEN_STATE_NB           = 4;
 constexpr int LOW_PLY_HISTORY_SIZE     = 5;
 
 static_assert((PAWN_HISTORY_BASE_SIZE & (PAWN_HISTORY_BASE_SIZE - 1)) == 0,
@@ -186,9 +187,18 @@ struct CorrHistTypedef<Continuation> {
 
 }
 
-using UnifiedCorrectionHistory =
-  DynStats<MultiArray<CorrectionBundle<i16, CORRECTION_HISTORY_LIMIT>, COLOR_NB>,
-           CORRHIST_BASE_SIZE>;
+// Queen-presence bucket, mirroring the SFNNv18 layer stacks:
+// 0 = no queens, 1 = only the opponent's, 2 = only ours, 3 = both.
+// The static evaluation conditions its input features and output layers on
+// these regimes, so the correction of its errors is conditioned on them too.
+inline int queen_state(const Position& pos) {
+    return (int(pos.pieces(pos.side_to_move(), QUEEN) != 0) << 1)
+         | int(pos.pieces(~pos.side_to_move(), QUEEN) != 0);
+}
+
+using UnifiedCorrectionHistory = DynStats<
+  MultiArray<CorrectionBundle<i16, CORRECTION_HISTORY_LIMIT>, QUEEN_STATE_NB, COLOR_NB>,
+  CORRHIST_BASE_SIZE>;
 
 template<CorrHistType T>
 using CorrectionHistory = typename Detail::CorrHistTypedef<T>::type;
@@ -225,26 +235,26 @@ struct SharedHistories {
     }
 
     auto& pawn_correction_entry(const Position& pos) {
-        return correctionHistory[pos.pawn_key() & sizeMinus1];
+        return correctionHistory[pos.pawn_key() & sizeMinus1][queen_state(pos)];
     }
     const auto& pawn_correction_entry(const Position& pos) const {
-        return correctionHistory[pos.pawn_key() & sizeMinus1];
+        return correctionHistory[pos.pawn_key() & sizeMinus1][queen_state(pos)];
     }
 
     auto& minor_piece_correction_entry(const Position& pos) {
-        return correctionHistory[pos.minor_piece_key() & sizeMinus1];
+        return correctionHistory[pos.minor_piece_key() & sizeMinus1][queen_state(pos)];
     }
     const auto& minor_piece_correction_entry(const Position& pos) const {
-        return correctionHistory[pos.minor_piece_key() & sizeMinus1];
+        return correctionHistory[pos.minor_piece_key() & sizeMinus1][queen_state(pos)];
     }
 
     template<Color c>
     auto& nonpawn_correction_entry(const Position& pos) {
-        return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
+        return correctionHistory[pos.non_pawn_key(c) & sizeMinus1][queen_state(pos)];
     }
     template<Color c>
     const auto& nonpawn_correction_entry(const Position& pos) const {
-        return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
+        return correctionHistory[pos.non_pawn_key(c) & sizeMinus1][queen_state(pos)];
     }
 
     UnifiedCorrectionHistory               correctionHistory;
