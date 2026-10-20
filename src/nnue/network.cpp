@@ -156,7 +156,22 @@ Value Network::evaluate(const Position&    pos,
     const int   bucket      = pcBucket * 4 + queenBucket;
 
     featureTransformer.transform(pos, accumulatorStack, cache, transformedFeatures, nnzInfo);
-    const auto positional = network[bucket].propagate(transformedFeatures, nnzInfo);
+
+    i32 positional = network[bucket].propagate(transformedFeatures, nnzInfo);
+
+    // Blend adjacent layer stacks at the piece-count bucket seams. Each stack
+    // is trained only on the positions of its own bucket, so a capture that
+    // moves the game across a seam (e.g. 9 -> 8 pieces) hard-switches between
+    // independently trained heads. Mixing in 25% of the neighboring stack
+    // hedges the resulting discontinuity.
+    const int pieceCount = pos.count<ALL_PIECES>();
+    if (pieceCount % 4 == 0 && pcBucket < 7)
+        positional =
+          (3 * positional + network[bucket + 4].propagate(transformedFeatures, nnzInfo)) / 4;
+    else if (pieceCount % 4 == 1 && pcBucket > 0)
+        positional =
+          (3 * positional + network[bucket - 4].propagate(transformedFeatures, nnzInfo)) / 4;
+
     return static_cast<Value>(positional / OutputScale);
 }
 
