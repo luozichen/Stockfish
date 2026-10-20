@@ -177,7 +177,7 @@ class AffineTransformSparseInput {
         constexpr IndexType NumRegs =
     #if (defined(USE_VNNI) && defined(USE_AVX512)) || defined(USE_NEON_DOTPROD)
           3 * NumAccums;
-    #elif defined(USE_AVXVNNI)
+    #elif defined(USE_AVXVNNI) || (defined(USE_AVX2) && !defined(USE_AVX512))
           2 * NumAccums;
     #else
           NumAccums;
@@ -188,7 +188,7 @@ class AffineTransformSparseInput {
         for (IndexType k = 0; k < NumAccums; ++k)
             acc[k] = biasvec[k];
 
-    #if defined(USE_AVXVNNI)
+    #if defined(USE_AVXVNNI) || (defined(USE_AVX2) && !defined(USE_AVX512))
         for (IndexType k = NumAccums; k < NumRegs; ++k)
             acc[k] = vec_set_32(0);
     #elif defined(USE_NEON_DOTPROD)
@@ -341,6 +341,33 @@ class AffineTransformSparseInput {
                 }
             }
         #else
+        #if defined(USE_AVX2)
+            while (bits)
+            {
+                const isize   i0   = pop_lsb(bits);
+                const invec_t in0  = vec_load_32(base_addr + i0 * sizeof(i32));
+                const auto    col0 = reinterpret_cast<const invec_t*>(
+                  &weights_base[i0 * OutputDimensions * ChunkSize]);
+
+                if (!bits)
+                {
+                    for (IndexType l = 0; l < NumAccums; ++l)
+                        vec_add_dpbusd_32(acc[l], in0, col0[l]);
+                    break;
+                }
+
+                const isize   i1   = pop_lsb(bits);
+                const invec_t in1  = vec_load_32(base_addr + i1 * sizeof(i32));
+                const auto    col1 = reinterpret_cast<const invec_t*>(
+                  &weights_base[i1 * OutputDimensions * ChunkSize]);
+
+                for (IndexType l = 0; l < NumAccums; ++l)
+                {
+                    vec_add_dpbusd_32(acc[l], in0, col0[l]);
+                    vec_add_dpbusd_32(acc[l + NumAccums], in1, col1[l]);
+                }
+            }
+        #else
             while (bits)
             {
                 isize       i          = pop_lsb(bits);
@@ -358,9 +385,10 @@ class AffineTransformSparseInput {
                     vec_add_dpbusd_32(acc[l], in, col[l]);
             }
         #endif
+        #endif
         }
 
-        #if defined(USE_AVXVNNI)
+        #if defined(USE_AVXVNNI) || (defined(USE_AVX2) && !defined(USE_AVX512))
         for (IndexType l = 0; l < NumAccums; ++l)
             acc[l] = vec_add_32(acc[l], acc[l + NumAccums]);
         #elif defined(USE_NEON_DOTPROD)
