@@ -249,7 +249,30 @@ ExtMove* MovePicker::generate_and_score() {
             value += PieceValue[pt] * v;
 
             if (lph)
-                value += 8 * (*lph)[m.raw()] / (1 + ply);
+            {
+                // ply < LOW_PLY_HISTORY_SIZE here, so the loop-invariant divisor
+                // takes a constant value per case, letting the compiler emit an
+                // exact multiplication instead of a division per quiet move.
+                const int lphValue = 8 * (*lph)[m.raw()];
+                switch (ply)
+                {
+                case 0 :
+                    value += lphValue;
+                    break;
+                case 1 :
+                    value += lphValue / 2;
+                    break;
+                case 2 :
+                    value += lphValue / 3;
+                    break;
+                case 3 :
+                    value += lphValue / 4;
+                    break;
+                default :
+                    value += lphValue / 5;
+                    break;
+                }
+            }
 
             // bonus for checks
             if ((pos.check_squares(pt) & to) && pos.see_ge(m, -75))
