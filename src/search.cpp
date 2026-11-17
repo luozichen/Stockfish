@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -52,10 +53,55 @@
 
 namespace Stockfish {
 
-inline int lmr_divisor(int depth) {
+constexpr int lmr_divisor(int depth) {
     int d = std::min(depth, 16);
     return 3000 + 7 * (d - 8) * (d - 8);
 }
+
+// lmr_divisor() only takes 16 distinct values, all in [3000, 3448], so the
+// per-move division by it can be replaced with an exact multiplication by
+// M = ceil(2^43 / d). Division by a ceil-magic is exact when x * (d - 1) < 2^43,
+// which holds for every 32-bit x because d - 1 < 2^12; with d >= 2048 the
+// products stay below 2^63, well inside 64 bits. The magnitude and the final
+// sign are formed without branches, so the replacement is fully branch-free.
+constexpr u64 lmr_divisor_magic(int d) { return (u64(1) << 43) / d + ((u64(1) << 43) % d != 0); }
+
+constexpr int lmr_fastdiv(int x, u64 magic) {
+    const u64 mask = u64(x >> 31);            // 0 or all ones
+    const u64 ins  = (u64(x) ^ mask) - mask;  // |x|
+    const u64 q    = (ins * magic) >> 43;
+    return int((q ^ mask) - mask);  // q with the sign of x
+}
+
+constexpr std::array<u64, 16> LmrDivisorMagics = [] {
+    std::array<u64, 16> magics{};
+    for (int d = 0; d < 16; ++d)
+        magics[d] = lmr_divisor_magic(lmr_divisor(d + 1));
+    return magics;
+}();
+
+// Verify the magic division at the boundaries of every divisor
+constexpr bool lmr_magics_are_exact() {
+    for (int depth = 1; depth <= 16; ++depth)
+    {
+        const u64 magic = LmrDivisorMagics[depth - 1];
+        const int d     = lmr_divisor(depth);
+        const int range = (1 << 24) / d + 1;
+        for (int k = -range; k <= range; ++k)
+            for (int e = -1; e <= 1; ++e)
+            {
+                const int x = k * d + e;
+                if (x / d != lmr_fastdiv(x, magic))
+                    return false;
+            }
+        for (int x : {std::numeric_limits<int>::max(), std::numeric_limits<int>::max() - 1,
+                      std::numeric_limits<int>::min() + 1, d, -d, 0})
+            if (x / d != lmr_fastdiv(x, magic))
+                return false;
+    }
+    return true;
+}
+static_assert(lmr_magics_are_exact(), "lmr_fastdiv must match integer division exactly");
 
 namespace TB = Tablebases;
 
@@ -1238,7 +1284,7 @@ moves_loop:  // When in check, search starts here
                 history += 69 * mainHistory[us][move.raw()] / 32;
 
                 // (*Scaler): Generally, lower divisors scale well
-                lmrDepth += history / lmr_divisor(depth);
+                lmrDepth += lmr_fastdiv(history, LmrDivisorMagics[std::min(depth, 16) - 1]);
 
                 Value futilityValue =
                   ss->staticEval + 119 * lmrDepth + 90 * (ss->staticEval > alpha) + 164;
