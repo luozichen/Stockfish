@@ -288,6 +288,7 @@ bool Search::Worker::iterative_deepening() {
 
     Value  alpha, beta, bestValue;
     double timeReduction = 1, totBestMoveChanges = 0;
+    TimePoint previousElapsed = 0;
     int    delta, iterIdx                        = 0;
 
     // Allocate stack with extra size to allow access from (ss - 7) to (ss + 2):
@@ -614,10 +615,17 @@ bool Search::Worker::iterative_deepening() {
                 totalTime = std::min(500.0 * std::max(limits.npmsec, TimePoint(1)), totalTime);
 
             auto elapsedTime = elapsed();
+            // The best move is stable and the next iteration will not fit in the time left:
+            // it would almost never change the move, so stop now and leave the time.
+            const bool stableStop = threads.size() == 1 && !mainThread->ponder
+                                   && rootDepth - lastBestMoveDepth >= 8
+                                   && elapsedTime + 1.4 * (elapsedTime - previousElapsed)
+                                        > std::min(totalTime, double(mainThread->tm.maximum()));
+            previousElapsed = elapsedTime;
 
             // Stop the search if we have exceeded totalTime or maximum time,
             // or if we know that there are no better moves in the analysed line(s).
-            if (elapsedTime > std::min(totalTime, double(mainThread->tm.maximum()))
+            if (elapsedTime > std::min(totalTime, double(mainThread->tm.maximum())) || stableStop
                 || rootMoves[multiPV - 1].score >= mate_in(3) || rootMoves[0].score == mated_in(2))
             {
                 // If we are allowed to ponder do not stop the search now but
