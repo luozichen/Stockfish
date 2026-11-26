@@ -210,6 +210,7 @@ void Search::Worker::start_searching() {
 
     main_manager()->tm.init(limits, rootPos.side_to_move(), rootPos.game_ply(), options,
                             main_manager()->originalTimeAdjust);
+    main_manager()->stopOnOverrun = false;
     tt.new_search();
     main_manager()->updates.onStart();
 
@@ -289,6 +290,11 @@ bool Search::Worker::iterative_deepening() {
     Value  alpha, beta, bestValue;
     double timeReduction = 1, totBestMoveChanges = 0;
     int    delta, iterIdx                        = 0;
+
+    // Growth of the last two iterations, to estimate the duration of the next one
+    TimePoint previousElapsed = 0;
+    u64       previousNodes   = 0;
+    double    previousGrowth  = 0;
 
     // Allocate stack with extra size to allow access from (ss - 7) to (ss + 2):
     // (ss - 7) is needed for update_continuation_histories(ss - 1) which accesses (ss - 6),
@@ -615,6 +621,17 @@ bool Search::Worker::iterative_deepening() {
 
             auto elapsedTime = elapsed();
 
+            // How much did the last iteration grow, in nodes? Take the larger of the
+            // last two growth factors, but never assume an iteration to get cheaper.
+            double iterationGrowth =
+              previousNodes ? double(nodes - previousNodes) / double(previousNodes) : 0.0;
+            TimePoint expectedNextIteration = TimePoint(
+              std::max({1.0, iterationGrowth, previousGrowth}) * (elapsedTime - previousElapsed));
+
+            previousElapsed = elapsedTime;
+            previousNodes   = nodes;
+            previousGrowth  = iterationGrowth;
+
             // Stop the search if we have exceeded totalTime or maximum time,
             // or if we know that there are no better moves in the analysed line(s).
             if (elapsedTime > std::min(totalTime, double(mainThread->tm.maximum()))
@@ -628,7 +645,22 @@ bool Search::Worker::iterative_deepening() {
                     threads.stop = true;
             }
             else
-                threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.50;
+            {
+                // Start a further iteration while at most half the time is used. Past that,
+                // start it only if the growth of the last ones suggests that it still fits
+                // in the time left, and give it up if it turns out not to.
+                TimePoint budget = TimePoint(std::min(totalTime, double(mainThread->tm.maximum())));
+
+                mainThread->stopOnOverrun = !mainThread->ponder && threads.size() == 1
+                                         && elapsedTime > totalTime * 0.50
+                                         && elapsedTime + expectedNextIteration <= budget;
+
+                threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.50
+                                     || mainThread->stopOnOverrun;
+
+                if (mainThread->stopOnOverrun)
+                    mainThread->overrunBudget = budget;
+            }
         }
 
         mainThread->iterValue[iterIdx] = rootMoves[0].score;
@@ -2132,7 +2164,10 @@ void SearchManager::check_time(Search::Worker& worker) {
     if (ponder)
         return;
 
-    if ((worker.limits.use_time_management() && (elapsed > tm.maximum() || stopOnPonderhit))
+    const bool overrun = stopOnOverrun && elapsed > overrunBudget;
+
+    if ((worker.limits.use_time_management()
+         && (elapsed > tm.maximum() || stopOnPonderhit || overrun))
         || (worker.limits.movetime && elapsed >= worker.limits.movetime)
         || (worker.limits.nodes && worker.threads.nodes_searched() >= worker.limits.nodes))
         worker.threads.stop = true;

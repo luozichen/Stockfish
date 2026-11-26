@@ -304,6 +304,10 @@ class SearchManager {
     Value                bestPreviousScore;
     Value                bestPreviousAverageScore;
     bool                 stopOnPonderhit;
+    // Giving up on a running iteration that was started past half the time and turns
+    // out not to fit in the time left (see check_time)
+    bool      stopOnOverrun = false;
+    TimePoint overrunBudget = 0;
 
     const UpdateContext& updates;
 };
