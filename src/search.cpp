@@ -210,6 +210,7 @@ void Search::Worker::start_searching() {
 
     main_manager()->tm.init(limits, rootPos.side_to_move(), rootPos.game_ply(), options,
                             main_manager()->originalTimeAdjust);
+    main_manager()->stopOnOverrun = false;
     tt.new_search();
     main_manager()->updates.onStart();
 
@@ -629,6 +630,14 @@ bool Search::Worker::iterative_deepening() {
             }
             else
                 threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.50;
+
+            // A deeper iteration is started for a search whose best move has been stable for
+            // many iterations. An iteration of such a search that ends soon hardly ever changes
+            // the move, so if this one overruns its budget it is given up (see check_time).
+            mainThread->stopOnOverrun = threads.increaseDepth && !mainThread->ponder
+                                      && threads.size() == 1
+                                      && rootDepth - lastBestMoveDepth >= 8;
+            mainThread->overrunBudget = totalTime;
         }
 
         mainThread->iterValue[iterIdx] = rootMoves[0].score;
@@ -2132,7 +2141,10 @@ void SearchManager::check_time(Search::Worker& worker) {
     if (ponder)
         return;
 
-    if ((worker.limits.use_time_management() && (elapsed > tm.maximum() || stopOnPonderhit))
+    const bool overrun = stopOnOverrun && elapsed > overrunBudget;
+
+    if ((worker.limits.use_time_management()
+         && (elapsed > tm.maximum() || stopOnPonderhit || overrun))
         || (worker.limits.movetime && elapsed >= worker.limits.movetime)
         || (worker.limits.nodes && worker.threads.nodes_searched() >= worker.limits.nodes))
         worker.threads.stop = true;
