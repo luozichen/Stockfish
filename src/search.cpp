@@ -199,9 +199,11 @@ void Search::Worker::ensure_network_replicated() {
 }
 
 // Change of the time in per mille when the opponent did not play the reply our
-// previous search predicted, and when it did play it.
-int DeviationBonus = 0;
-int PredictedCut   = 0;
+// previous search predicted, and when it did play it. The opponent plays the
+// predicted reply on about two thirds of the moves, so on average this leaves
+// the time about unchanged.
+int DeviationBonus = 300;
+int PredictedCut   = 140;
 
 TUNE(SetRange(-300, 300), DeviationBonus, PredictedCut);
 
