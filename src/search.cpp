@@ -290,6 +290,14 @@ bool Search::Worker::iterative_deepening() {
     double timeReduction = 1, totBestMoveChanges = 0;
     int    delta, iterIdx                        = 0;
 
+    // Cost of starting the next iteration relative to the total elapsed time,
+    // estimated from the growth of the last two completed iterations. The
+    // default of 2.0 is the classic assumption of an iteration costing about
+    // as much as everything searched so far.
+    double iterGrowth         = 2.0;
+    double lastIterTime       = 0.0;
+    double lastIterEndElapsed = 0.0;
+
     // Allocate stack with extra size to allow access from (ss - 7) to (ss + 2):
     // (ss - 7) is needed for update_continuation_histories(ss - 1) which accesses (ss - 6),
     // (ss + 2) is needed for initialization of cutOffCnt.
@@ -615,6 +623,20 @@ bool Search::Worker::iterative_deepening() {
 
             auto elapsedTime = elapsed();
 
+            // Predict the cost of the next iteration from the growth of the last
+            // two completed iterations, instead of assuming a fixed doubling.
+            // Skip the re-searches of the current depth: once deepening has been
+            // paused the search is in its terminal phase and the estimate no
+            // longer matters.
+            if (searchAgainCounter == 0)
+            {
+                double iterTime = elapsedTime - lastIterEndElapsed;
+                if (lastIterTime > 0.0 && std::min(lastIterTime, iterTime) > totalTime / 64)
+                    iterGrowth = std::clamp(iterTime / lastIterTime, 1.0, 4.0);
+                lastIterTime       = iterTime;
+                lastIterEndElapsed = elapsedTime;
+            }
+
             // Stop the search if we have exceeded totalTime or maximum time,
             // or if we know that there are no better moves in the analysed line(s).
             if (elapsedTime > std::min(totalTime, double(mainThread->tm.maximum()))
@@ -628,7 +650,8 @@ bool Search::Worker::iterative_deepening() {
                     threads.stop = true;
             }
             else
-                threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.50;
+                threads.increaseDepth =
+                  mainThread->ponder || elapsedTime * iterGrowth <= totalTime;
         }
 
         mainThread->iterValue[iterIdx] = rootMoves[0].score;
