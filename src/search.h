@@ -295,6 +295,8 @@ class SearchManager {
                    Depth                     depth);
 
     Stockfish::TimeManagement tm;
+    // Key of the position our best move and the predicted reply lead to
+    Key                       predictedKey = 0;
     double                    originalTimeAdjust;
     int                       callsCnt;
     std::atomic_bool          ponder;

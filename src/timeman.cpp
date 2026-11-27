@@ -49,7 +49,8 @@ void TimeManagement::init(Search::LimitsType& limits,
                           Color               us,
                           int                 ply,
                           const OptionsMap&   options,
-                          double&             originalTimeAdjust) {
+                          double&             originalTimeAdjust,
+                          double              optScaleFactor) {
     TimePoint npmsec = TimePoint(options["nodestime"]);
 
     // If we have no time, we don't need to fully initialize TM.
@@ -129,7 +130,7 @@ void TimeManagement::init(Search::LimitsType& limits,
 
         optScale = std::min(0.012112 + std::pow(ply + 3.22713, 0.46866) * optConstant,
                             0.19404 * limits.time[us] / timeLeft)
-                 * originalTimeAdjust;
+                 * originalTimeAdjust * optScaleFactor;
 
         maxScale = std::min(6.873, maxConstant + ply / 12.352);
     }

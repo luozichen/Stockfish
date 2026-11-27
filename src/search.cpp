@@ -46,6 +46,7 @@
 #include "thread.h"
 #include "timeman.h"
 #include "tt.h"
+#include "tune.h"
 #include "types.h"
 #include "uci.h"
 #include "ucioption.h"
@@ -197,6 +198,13 @@ void Search::Worker::ensure_network_replicated() {
     (void) (network[numaAccessToken]);
 }
 
+// Change of the time in per mille when the opponent did not play the reply our
+// previous search predicted, and when it did play it.
+int DeviationBonus = 0;
+int PredictedCut   = 0;
+
+TUNE(SetRange(-300, 300), DeviationBonus, PredictedCut);
+
 void Search::Worker::start_searching() {
 
     accumulatorStack.reset();
@@ -208,8 +216,21 @@ void Search::Worker::start_searching() {
         return;
     }
 
+    // The position after the reply we predicted is the one our previous search
+    // looked at the most. A different reply takes us to a position that was
+    // searched less, so give it more time.
+    Key predictedKey = main_manager()->predictedKey;
+
+    main_manager()->predictedKey = 0;
+
+    double optScaleFactor = 1.0;
+
+    if (predictedKey)
+        optScaleFactor = rootPos.key() == predictedKey ? 1.0 - PredictedCut / 1000.0
+                                                       : 1.0 + DeviationBonus / 1000.0;
+
     main_manager()->tm.init(limits, rootPos.side_to_move(), rootPos.game_ply(), options,
-                            main_manager()->originalTimeAdjust);
+                            main_manager()->originalTimeAdjust, optScaleFactor);
     tt.new_search();
     main_manager()->updates.onStart();
 
@@ -268,6 +289,20 @@ void Search::Worker::start_searching() {
     std::string ponder;
     if (bestThread->rootMoves[0].pv.size() > 1)
         ponder = UCIEngine::move(bestThread->rootMoves[0].pv[1], rootPos.is_chess960());
+
+    // Remember the position our best move and the predicted reply lead to
+    const RootPVMoves& pv = bestThread->rootMoves[0].pv;
+    if (pv.size() > 1)
+    {
+        rootPos.do_move(pv[0]);
+        if (rootPos.legal(pv[1]))
+        {
+            rootPos.do_move(pv[1]);
+            main_manager()->predictedKey = rootPos.key();
+            rootPos.undo_move(pv[1]);
+        }
+        rootPos.undo_move(pv[0]);
+    }
 
     auto bestmove = UCIEngine::move(bestThread->rootMoves[0].pv[0], rootPos.is_chess960());
     main_manager()->updates.onBestmove(bestmove, ponder);

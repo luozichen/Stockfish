@@ -37,11 +37,13 @@ struct LimitsType;
 // the maximum available time, the game move number, and other parameters.
 class TimeManagement {
    public:
+    // optScaleFactor scales the time for the current move.
     void init(Search::LimitsType& limits,
               Color               us,
               int                 ply,
               const OptionsMap&   options,
-              double&             originalTimeAdjust);
+              double&             originalTimeAdjust,
+              double              optScaleFactor);
 
     TimePoint optimum() const;
     TimePoint maximum() const;
