@@ -32,9 +32,9 @@ namespace Stockfish {
 // Scaling of the time by the stage of the game, measured as the material on the
 // board. The move number is only a proxy for the stage: a game may be in the
 // endgame at move 20, or still in a sharp middlegame at move 60. In per mille:
-// 1000 uses half the time with kings and pawns only and 1.5 times on a full
-// board, -1000 is the reverse, 0 disables it.
-int PhaseWeight = 0;
+// 800 uses 1.4 times the time on a full board and 0.6 times with kings and pawns
+// only, -800 is the reverse, 0 disables it.
+int PhaseWeight = 800;
 
 TUNE(SetRange(-1000, 1000), PhaseWeight);
 
