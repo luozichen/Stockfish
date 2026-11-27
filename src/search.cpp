@@ -208,7 +208,11 @@ void Search::Worker::start_searching() {
         return;
     }
 
-    main_manager()->tm.init(limits, rootPos.side_to_move(), rootPos.game_ply(), options,
+    // Stage of the game from the material on the board, in [0, 24] on a full board
+    const int phase = rootPos.count<KNIGHT>() + rootPos.count<BISHOP>()
+                    + 2 * rootPos.count<ROOK>() + 4 * rootPos.count<QUEEN>();
+
+    main_manager()->tm.init(limits, rootPos.side_to_move(), rootPos.game_ply(), phase, options,
                             main_manager()->originalTimeAdjust);
     tt.new_search();
     main_manager()->updates.onStart();

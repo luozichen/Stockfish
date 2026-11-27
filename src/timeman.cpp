@@ -23,10 +23,20 @@
 #include <cmath>
 
 #include "search.h"
+#include "tune.h"
 #include "types.h"
 #include "ucioption.h"
 
 namespace Stockfish {
+
+// Scaling of the time by the stage of the game, measured as the material on the
+// board. The move number is only a proxy for the stage: a game may be in the
+// endgame at move 20, or still in a sharp middlegame at move 60. In per mille:
+// 1000 uses half the time with kings and pawns only and 1.5 times on a full
+// board, -1000 is the reverse, 0 disables it.
+int PhaseWeight = 0;
+
+TUNE(SetRange(-1000, 1000), PhaseWeight);
 
 TimePoint TimeManagement::optimum() const { return optimumTime; }
 TimePoint TimeManagement::maximum() const { return maximumTime; }
@@ -48,6 +58,7 @@ void TimeManagement::advance_nodes_time(i64 nodes) {
 void TimeManagement::init(Search::LimitsType& limits,
                           Color               us,
                           int                 ply,
+                          int                 phase,
                           const OptionsMap&   options,
                           double&             originalTimeAdjust) {
     TimePoint npmsec = TimePoint(options["nodestime"]);
@@ -129,7 +140,7 @@ void TimeManagement::init(Search::LimitsType& limits,
 
         optScale = std::min(0.012112 + std::pow(ply + 3.22713, 0.46866) * optConstant,
                             0.19404 * limits.time[us] / timeLeft)
-                 * originalTimeAdjust;
+                 * originalTimeAdjust * (1.0 + PhaseWeight * (phase / 24.0 - 0.5) / 1000.0);
 
         maxScale = std::min(6.873, maxConstant + ply / 12.352);
     }
